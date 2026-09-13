@@ -62,3 +62,164 @@ Two differences worth being clear about. This is a genuine Python loop, one step
 | logits | `(B, T, 80000)` |
 
 Most implementation bugs in this architecture are shape bugs at the handoff, or an off-by-one in the input/label offset. Worth asserting both explicitly the first time through.
+
+## Simplified
+
+Let me shrink everything so the numbers are readable. Toy setup: 1 layer instead of 4, hidden size 4 instead of 1000, vocabulary of 10 words instead of 80,000. Everything else is identical to the real thing.
+
+## The vocabularies
+
+```
+English            French
+0: <PAD>           0: <PAD>
+1: <EOS>           1: <EOS>
+2: <SOS>           2: <SOS>
+3: <UNK>           3: <UNK>
+4: Mary            4: Marie
+5: admires         5: admire
+6: John            6: Jean
+```
+
+## Step 1: one raw pair
+
+```
+Mary admires John   ->   Marie admire Jean
+```
+
+## Step 2: tokenize and look up IDs
+
+```
+src = [4, 5, 6]
+tgt = [4, 5, 6]
+```
+
+(Coincidence that they match, the vocabularies are separate tables.)
+
+## Step 3: reverse source, add boundary tokens
+
+```
+src = [6, 5, 4, 1]          John admires Mary <EOS>
+tgt = [2, 4, 5, 6, 1]       <SOS> Marie admire Jean <EOS>
+```
+
+## Step 4: split the target into input and label
+
+```
+dec_in  = [2, 4, 5, 6]      <SOS> Marie admire Jean
+dec_out = [4, 5, 6, 1]      Marie admire Jean <EOS>
+```
+
+Line them up vertically and the whole training objective becomes visible:
+
+| position | model sees | model must predict |
+|---|---|---|
+| 1 | `<SOS>` | Marie |
+| 2 | Marie | admire |
+| 3 | admire | Jean |
+| 4 | Jean | `<EOS>` |
+
+## Step 5: embed the source
+
+Each ID picks a row from a 4-wide table:
+
+```
+6 -> [ 0.21, -0.44,  0.90,  0.13]
+5 -> [-0.32,  0.71,  0.05, -0.88]
+4 -> [ 0.67,  0.02, -0.51,  0.40]
+1 -> [ 0.00,  0.15,  0.22, -0.09]
+```
+
+## Step 6: encoder runs
+
+```
+h0 = [0, 0, 0, 0]
+
+t=1  read John      h1 = [ 0.12, -0.30,  0.55,  0.08]
+t=2  read admires   h2 = [-0.05,  0.41,  0.33, -0.60]
+t=3  read Mary      h3 = [ 0.48,  0.19, -0.22,  0.31]
+t=4  read <EOS>     h4 = [ 0.51,  0.23, -0.18,  0.29]   <- this is v
+```
+
+h1, h2, h3 are gone. Only h4 continues. (Plus the cell state c4, same shape, which I'm omitting for clarity but travels alongside.)
+
+## Step 7: handoff
+
+```
+decoder s0 = h4 = [0.51, 0.23, -0.18, 0.29]
+```
+
+## Step 8: decoder runs, all positions at once
+
+Because you already have the true `dec_in`, you don't loop. All four inputs go through together:
+
+```
+pos 1: embed(<SOS>)  -> s1 -> [ 0.33, -0.12,  0.44,  0.10]
+pos 2: embed(Marie)  -> s2 -> [-0.20,  0.55,  0.09, -0.31]
+pos 3: embed(admire) -> s3 -> [ 0.41,  0.27, -0.15,  0.62]
+pos 4: embed(Jean)   -> s4 -> [ 0.08, -0.39,  0.71,  0.24]
+```
+
+## Step 9: project each to vocabulary scores
+
+A linear layer maps 4 numbers to 7 numbers (one per French word). Position 1:
+
+```
+logits  = [-2.1, -1.8, -3.0, -2.5,  4.2,  0.7,  1.1]
+             PAD  EOS  SOS  UNK  Marie admire Jean
+
+softmax = [0.00, 0.00, 0.00, 0.00, 0.93, 0.03, 0.04]
+```
+
+The model puts 0.93 on `Marie`. The label says `Marie` (ID 4). Loss at this position is `-log(0.93) = 0.07`, small, because it was right.
+
+Suppose position 3 goes badly:
+
+```
+softmax = [0.00, 0.01, 0.00, 0.02, 0.05, 0.12, 0.80]
+label = Jean (ID 6), probability 0.80,  loss = -log(0.80) = 0.22
+```
+
+## Step 10: total loss, backward
+
+Average the per-position losses, backpropagate. Gradients flow back through s4 to s1, through the handoff into h4, and then back through h3, h2, h1 into the encoder and the embedding tables. This is the only way the encoder learns anything: the signal arrives entirely through that one handoff.
+
+## Now inference on the same sentence
+
+Steps 1 to 7 identical. Step 8 becomes a loop, because no `dec_in` exists.
+
+```
+s = [0.51, 0.23, -0.18, 0.29]      from encoder
+token = <SOS>
+
+iteration 1:
+  feed embed(<SOS>), state s
+  softmax -> Marie at 0.93
+  emit Marie,  s updates
+
+iteration 2:
+  feed embed(Marie)          <- its own output, not a label
+  softmax -> admire at 0.88
+  emit admire, s updates
+
+iteration 3:
+  feed embed(admire)
+  softmax -> Jean at 0.80
+  emit Jean, s updates
+
+iteration 4:
+  feed embed(Jean)
+  softmax -> <EOS> at 0.91
+  stop
+
+output: Marie admire Jean
+```
+
+## The one difference, side by side
+
+| | training | inference |
+|---|---|---|
+| decoder input at step 2 | true `Marie` from the label | whatever step 1 emitted |
+| execution | one parallel call | Python loop |
+| stopping | target length is known | when `<EOS>` appears |
+
+If the model had emitted `Jean` at iteration 1, training would still have fed it `Marie` at iteration 2. Inference feeds it `Jean`, and the output derails from there. That gap is the exposure problem, and it's the reason beam search exists.
