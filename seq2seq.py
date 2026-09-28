@@ -247,18 +247,20 @@ def train(model, train_pairs, cfg, src_vocab, tgt_vocab, log_every=5):
     optimizer = torch.optim.SGD(model.parameters(), lr=cfg.lr_init)
     lr = cfg.lr_init
     decay_start = cfg.epochs - cfg.num_halvings
-    rng = random.Random(cfg.seed)  # FIX: created once, so each epoch shuffles differently
- 
+    rng = random.Random(
+        cfg.seed
+    )  # FIX: created once, so each epoch shuffles differently
+
     for epoch in range(1, cfg.epochs + 1):
         if epoch > decay_start:
             lr *= cfg.lr_decay_factor
             for g in optimizer.param_groups:
                 g["lr"] = lr
- 
+
         model.train()
         batches = make_batches(train_pairs, cfg, src_vocab, tgt_vocab, rng=rng)
         total_loss, total_tokens = 0.0, 0
- 
+
         for src, tgt, src_lengths in batches:  # FIX: three values per batch
             optimizer.zero_grad()
             loss, loss_sum, n_tokens = compute_loss(model, src, tgt, src_lengths)
@@ -267,12 +269,14 @@ def train(model, train_pairs, cfg, src_vocab, tgt_vocab, log_every=5):
             optimizer.step()
             total_loss += loss_sum
             total_tokens += n_tokens
- 
+
         if epoch % log_every == 0 or epoch == 1:
             per_token = total_loss / total_tokens
-            print(f"  epoch {epoch:3d}  loss/token {per_token:6.4f}  "
-                  f"ppl {math.exp(per_token):8.3f}  lr {lr:.4f}")
- 
+            print(
+                f"  epoch {epoch:3d}  loss/token {per_token:6.4f}  "
+                f"ppl {math.exp(per_token):8.3f}  lr {lr:.4f}"
+            )
+
     return model
 
 
@@ -291,7 +295,7 @@ def greedy_decode(model, src, cfg):
 
     for _ in range(cfg.max_decode_len):
         logits, state = model.decoder(token, state)
-        token = logits[:, -1].argmax(dim=-1, keeptime=True)
+        token = logits[:, -1].argmax(dim=-1, keepdim=True)
         tid = token.item()
         if tid == EOS:
             break
