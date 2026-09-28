@@ -433,3 +433,57 @@ def check_overfit(cfg, src_vocab, tgt_vocab, train_pairs):
     acc = exact_match(model, subset, small_cfg, src_vocab, tgt_vocab, greedy_decode)
     print(f"  memorized {acc:.0%} of 20 training pairs")
     return acc
+
+
+#####################################
+# Main
+#####################################
+
+def main():
+    cfg = Config()
+    torch.manual_seed(cfg.seed)
+    random.seed(cfg.seed)
+
+    train_pairs, valid_pairs, src_vocab, tgt_vocab = build_dataset(cfg)
+
+    print("Data")
+    s, t = train_pairs[0]
+    print(f"  source          {' '.join(s)}   (len {len(s)})")
+    print(f"  target          {' '.join(t)}   (len {len(t)})")
+    si, ti = tensorize(train_pairs[0], src_vocab, tgt_vocab, cfg.reverse_source)
+    print(f"  source ids      {si}   reversed={cfg.reverse_source}, <eos> last")
+    print(f"  target ids      {ti}   <sos> first, <eos> last")
+    print(f"  vocab           {len(src_vocab)} source / {len(tgt_vocab)} target")
+    print(f"  pairs           {len(train_pairs)} train / {len(valid_pairs)} held out")
+
+    print("\nShapes")
+    model = Seq2Seq(len(src_vocab), len(tgt_vocab), cfg)
+    check_shapes(model, src_vocab, tgt_vocab, cfg)
+
+    print("\nOverfit check")
+    check_overfit(cfg, src_vocab, tgt_vocab, train_pairs)
+
+    print("\nTraining")
+    model = Seq2Seq(len(src_vocab), len(tgt_vocab), cfg)
+    train(model, train_pairs, cfg, src_vocab, tgt_vocab)
+
+    print("\nHeld-out exact match")
+    greedy = exact_match(model, valid_pairs, cfg, src_vocab, tgt_vocab,
+                         greedy_decode)
+    beam = exact_match(model, valid_pairs, cfg, src_vocab, tgt_vocab,
+                       beam_search)
+    print(f"  greedy          {greedy:.1%}")
+    print(f"  beam (B={cfg.beam_width})      {beam:.1%}")
+
+    print("\nSamples")
+    for pair in valid_pairs[:3]:
+        src_ids, _ = tensorize(pair, src_vocab, tgt_vocab, cfg.reverse_source)
+        out = greedy_decode(model, torch.tensor([src_ids]), cfg)
+        print(f"  source          {' '.join(pair[0])}")
+        print(f"  reference       {' '.join(pair[1])}")
+        print(f"  predicted       {' '.join(tgt_vocab.decode(out))}")
+        print()
+
+
+if __name__ == "__main__":
+    main()
