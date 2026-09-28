@@ -133,11 +133,9 @@ def tensorize(pair, src_vocab, tgt_vocab, reverse_source):
     return src_ids, tgt_ids
 
 
-def make_batches(pairs, cfg, src_vocab, tgt_vocab, shuffle=True):
+def make_batches(pairs, cfg, src_vocab, tgt_vocab, rng=None, shuffle=True):
     data = [tensorize(p, src_vocab, tgt_vocab, cfg.reverse_source) for p in pairs]
-    data.sort(
-        key=lambda x: len(x[0])
-    )  # sorts all examples by source length, shortest first
+    data.sort(key=lambda x: len(x[0]))  # sort by source length, shortest first
     batches = []
     for i in range(0, len(data), cfg.batch_size):
         chunk = data[i : i + cfg.batch_size]
@@ -225,11 +223,12 @@ class Seq2Seq(nn.Module):
 #####################################
 
 
-def compute_loss(model, src, tgt):
-    tgt_in = tgt[:, :-1]
-    tgt_out = tgt[:, 1:]
+def compute_loss(model, src, tgt, src_lengths):
+    tgt_in = tgt[:, :-1]  # <sos> y1 ... yT
+    tgt_out = tgt[:, 1:]  # y1 ... yT <eos>
 
-    logits = model(src, tgt_in)
+    logits = model(src, src_lengths, tgt_in)
+
     loss_sum = nn.functional.cross_entropy(
         logits.reshape(-1, logits.size(-1)),
         tgt_out.reshape(-1),
@@ -237,7 +236,7 @@ def compute_loss(model, src, tgt):
         reduction="sum",
     )
     num_tokens = (tgt_out != PAD).sum().item()
-    return loss_sum / src.size(0), loss_sum.items(), num_tokens
+    return loss_sum / src.size(0), loss_sum.item(), num_tokens
 
 
 def clip_gradients(model, threshold):
@@ -247,41 +246,33 @@ def clip_gradients(model, threshold):
 def train(model, train_pairs, cfg, src_vocab, tgt_vocab, log_every=5):
     optimizer = torch.optim.SGD(model.parameters(), lr=cfg.lr_init)
     lr = cfg.lr_init
-
     decay_start = cfg.epochs - cfg.num_halvings
-
+    rng = random.Random(cfg.seed)  # FIX: created once, so each epoch shuffles differently
+ 
     for epoch in range(1, cfg.epochs + 1):
         if epoch > decay_start:
             lr *= cfg.lr_decay_factor
             for g in optimizer.param_groups:
                 g["lr"] = lr
-
+ 
         model.train()
-        batches = make_batches(train_pairs, cfg, src_vocab, tgt_vocab)
+        batches = make_batches(train_pairs, cfg, src_vocab, tgt_vocab, rng=rng)
         total_loss, total_tokens = 0.0, 0
-
-        for src, tgt in batches:  # one batch at a time
-            optimizer.zero_grad()  # clear gradients from the previous batch (PyTorch accumulates them)
-            loss, loss_sum, n_tokens = compute_loss(
-                model, src, tgt
-            )  # forward pass with teacher forcing; loss is scaled by batch size
-            loss.backward()  # compute gradients of the loss w.r.t. every weight
-            clip_gradients(
-                model, cfg.clip_threshold
-            )  # cap the gradient norm at 5 to stop exploding updates
-            optimizer.step()  # update weights: w = w - lr * grad
-            total_loss += loss_sum  # running total of token loss, for logging
-            total_tokens += (
-                n_tokens  # running count of real (non-pad) tokens, for per-token loss
-            )
-
+ 
+        for src, tgt, src_lengths in batches:  # FIX: three values per batch
+            optimizer.zero_grad()
+            loss, loss_sum, n_tokens = compute_loss(model, src, tgt, src_lengths)
+            loss.backward()
+            clip_gradients(model, cfg.clip_threshold)
+            optimizer.step()
+            total_loss += loss_sum
+            total_tokens += n_tokens
+ 
         if epoch % log_every == 0 or epoch == 1:
             per_token = total_loss / total_tokens
-            print(
-                f"  epoch {epoch:3d}  loss/token {per_token:6.4f}  "
-                f"ppl {math.exp(per_token):8.3f}  lr {lr:.4f}"
-            )
-
+            print(f"  epoch {epoch:3d}  loss/token {per_token:6.4f}  "
+                  f"ppl {math.exp(per_token):8.3f}  lr {lr:.4f}")
+ 
     return model
 
 
@@ -439,6 +430,7 @@ def check_overfit(cfg, src_vocab, tgt_vocab, train_pairs):
 # Main
 #####################################
 
+
 def main():
     cfg = Config()
     torch.manual_seed(cfg.seed)
@@ -468,10 +460,8 @@ def main():
     train(model, train_pairs, cfg, src_vocab, tgt_vocab)
 
     print("\nHeld-out exact match")
-    greedy = exact_match(model, valid_pairs, cfg, src_vocab, tgt_vocab,
-                         greedy_decode)
-    beam = exact_match(model, valid_pairs, cfg, src_vocab, tgt_vocab,
-                       beam_search)
+    greedy = exact_match(model, valid_pairs, cfg, src_vocab, tgt_vocab, greedy_decode)
+    beam = exact_match(model, valid_pairs, cfg, src_vocab, tgt_vocab, beam_search)
     print(f"  greedy          {greedy:.1%}")
     print(f"  beam (B={cfg.beam_width})      {beam:.1%}")
 
