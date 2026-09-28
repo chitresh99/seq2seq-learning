@@ -155,3 +155,59 @@ def make_batches(pairs, cfg, src_vocab, tgt_vocab, shuffle=True):
         rng.shuffle(batches)
     return batches
 
+#####################################
+# Model
+#####################################
+
+class Encoder(nn.Module):
+    def __init__(self, vocab_size, cfg):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, cfg.embed_dim, padding_idx=PAD)
+        self.lstm = nn.LSTM(cfg.embed_dim, cfg.hidden_dim, cfg.num_layers,
+                            batch_first=True)
+ 
+    def forward(self, src, src_lengths):
+        emb = self.embedding(src)  # (batch, src_len, embed)
+        packed = nn.utils.rnn.pack_padded_sequence(
+            emb, src_lengths.cpu(), batch_first=True, enforce_sorted=False)
+        # outputs is deliberately unused; keeping it would be the first step
+        # toward attention.
+        _, (h, c) = self.lstm(packed)
+        return h, c  # each (layers, batch, hidden)
+ 
+ 
+class Decoder(nn.Module):
+    def __init__(self, vocab_size, cfg):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, cfg.embed_dim, padding_idx=PAD)
+        self.lstm = nn.LSTM(cfg.embed_dim, cfg.hidden_dim, cfg.num_layers,
+                            batch_first=True)
+        # maps each hidden state to one score (logit) per target word.
+        self.projection = nn.Linear(cfg.hidden_dim, vocab_size)
+ 
+    def forward(self, tgt_in, state):
+        emb = self.embedding(tgt_in)            # (batch, tgt_len, embed)
+        outputs, state = self.lstm(emb, state)  # (batch, tgt_len, hidden)
+        logits = self.projection(outputs)       # (batch, tgt_len, vocab)
+        return logits, state
+ 
+ 
+class Seq2Seq(nn.Module):
+    def __init__(self, src_vocab_size, tgt_vocab_size, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.encoder = Encoder(src_vocab_size, cfg)
+        self.decoder = Decoder(tgt_vocab_size, cfg)
+        self.init_weights()
+ 
+    def init_weights(self):
+        for p in self.parameters():
+            nn.init.uniform_(p, -self.cfg.init_range, self.cfg.init_range)
+        with torch.no_grad():
+            self.encoder.embedding.weight[PAD].zero_()
+            self.decoder.embedding.weight[PAD].zero_()
+ 
+    def forward(self, src, src_lengths, tgt_in):
+        state = self.encoder(src, src_lengths)
+        logits, _ = self.decoder(tgt_in, state)
+        return logits
