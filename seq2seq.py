@@ -249,7 +249,7 @@ def train(model, train_pairs, cfg, src_vocab, tgt_vocab, log_every=5):
     decay_start = cfg.epochs - cfg.num_halvings
     rng = random.Random(
         cfg.seed
-    )  # FIX: created once, so each epoch shuffles differently
+    )
 
     for epoch in range(1, cfg.epochs + 1):
         if epoch > decay_start:
@@ -261,7 +261,7 @@ def train(model, train_pairs, cfg, src_vocab, tgt_vocab, log_every=5):
         batches = make_batches(train_pairs, cfg, src_vocab, tgt_vocab, rng=rng)
         total_loss, total_tokens = 0.0, 0
 
-        for src, tgt, src_lengths in batches:  # FIX: three values per batch
+        for src, tgt, src_lengths in batches:
             optimizer.zero_grad()
             loss, loss_sum, n_tokens = compute_loss(model, src, tgt, src_lengths)
             loss.backward()
