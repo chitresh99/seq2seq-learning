@@ -289,8 +289,9 @@ def train(model, train_pairs, cfg, src_vocab, tgt_vocab, log_every=5):
 # Decoding
 #####################################
 
+
 @torch.no_grad()
-def greedy_decode(model,src,cfg):
+def greedy_decode(model, src, cfg):
     model.eval()
     src_lengths = torch.tensor([src.size(1)])
     state = model.encoder(src, src_lengths)
@@ -298,8 +299,8 @@ def greedy_decode(model,src,cfg):
     out = []
 
     for _ in range(cfg.max_decode_len):
-        logits,state = model.decoder(token,state)
-        token = logits[:,-1].argmax(dim=-1,keeptime=True)
+        logits, state = model.decoder(token, state)
+        token = logits[:, -1].argmax(dim=-1, keeptime=True)
         tid = token.item()
         if tid == EOS:
             break
@@ -307,35 +308,46 @@ def greedy_decode(model,src,cfg):
 
     return out
 
-@torch.no_grad()                                                   # no gradients needed at inference
+
+@torch.no_grad()  # no gradients needed at inference
 def beam_search(model, src, cfg):
     model.eval()
-    src_lengths = torch.tensor([src.size(1)])                      # one sentence, so its length = number of columns
-    state = model.encoder(src, src_lengths)                        # (h, c): summary of the source
+    src_lengths = torch.tensor(
+        [src.size(1)]
+    )  # one sentence, so its length = number of columns
+    state = model.encoder(src, src_lengths)  # (h, c): summary of the source
 
-    beams = [([], 0.0, state)]                                     # each beam: (tokens so far, total log prob, lstm state)
-    finished = []                                                  # complete sentences (ended with <eos>)
+    beams = [([], 0.0, state)]  # each beam: (tokens so far, total log prob, lstm state)
+    finished = []  # complete sentences (ended with <eos>)
 
     for _ in range(cfg.max_decode_len):
         candidates = []
         for tokens, score, st in beams:
-            last = torch.tensor([[tokens[-1] if tokens else SOS]]) # feed last word, or <sos> at the very start
-            logits, new_state = model.decoder(last, st)            # each beam uses ITS OWN state
-            log_probs = torch.log_softmax(logits[0, -1], dim=-1)   # scores -> log probs (add instead of multiply)
+            last = torch.tensor(
+                [[tokens[-1] if tokens else SOS]]
+            )  # feed last word, or <sos> at the very start
+            logits, new_state = model.decoder(last, st)  # each beam uses ITS OWN state
+            log_probs = torch.log_softmax(
+                logits[0, -1], dim=-1
+            )  # scores -> log probs (add instead of multiply)
 
-            topk = torch.topk(log_probs, cfg.beam_width)           # best B next words for this beam
+            topk = torch.topk(
+                log_probs, cfg.beam_width
+            )  # best B next words for this beam
             for lp, idx in zip(topk.values.tolist(), topk.indices.tolist()):
-                candidates.append((tokens + [idx], score + lp, new_state))  # extend sentence, add its log prob
+                candidates.append(
+                    (tokens + [idx], score + lp, new_state)
+                )  # extend sentence, add its log prob
 
-        candidates.sort(key=lambda x: x[1], reverse=True)          # best total score first
+        candidates.sort(key=lambda x: x[1], reverse=True)  # best total score first
 
         beams = []
         for tokens, score, st in candidates:
             if tokens[-1] == EOS:
-                finished.append((tokens[:-1], score))              # done: set aside, drop the <eos>
+                finished.append((tokens[:-1], score))  # done: set aside, drop the <eos>
             else:
                 beams.append((tokens, score, st))
-            if len(beams) == cfg.beam_width:                       # stop once we have B LIVE beams
+            if len(beams) == cfg.beam_width:  # stop once we have B LIVE beams
                 break
 
         if not beams:
@@ -343,8 +355,14 @@ def beam_search(model, src, cfg):
 
         if finished:
             best_finished = max(s for _, s in finished)
-            if best_finished >= beams[0][1]:                       # scores only go down, so no live beam can win now
+            if (
+                best_finished >= beams[0][1]
+            ):  # scores only go down, so no live beam can win now
                 break
 
-    finished += [(t, s) for t, s, _ in beams]                      # unfinished beams still count if we hit the length cap
-    return max(finished, key=lambda x: x[1])[0]                    # tokens of the highest-scoring sentence
+    finished += [
+        (t, s) for t, s, _ in beams
+    ]  # unfinished beams still count if we hit the length cap
+    return max(finished, key=lambda x: x[1])[
+        0
+    ]  # tokens of the highest-scoring sentence
