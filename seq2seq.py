@@ -366,3 +366,70 @@ def beam_search(model, src, cfg):
     return max(finished, key=lambda x: x[1])[
         0
     ]  # tokens of the highest-scoring sentence
+
+
+#####################################
+# Evaluation
+#####################################
+
+
+def exact_match(model, pairs, cfg, src_vocab, tgt_vocab, decoder_fn):
+    correct = 0
+    for pair in pairs:
+        src_ids, _ = tensorize(pair, src_vocab, tgt_vocab, cfg.reverse_source)
+        src = torch.tensor([src_ids])
+        predicted = tgt_vocab.decode(decoder_fn(model, src, cfg))
+        if predicted == pair[1]:
+            correct += 1
+    return correct / len(pairs)
+
+
+#####################################
+# Checks
+#####################################
+
+
+def check_shapes(model, src_vocab, tgt_vocab, cfg):
+    """Assert the handoff is wired correctly.
+
+    Most bugs in this architecture are shape errors at the encoder-decoder
+    boundary, or an off-by-one in the input/label offset. Both are cheap to
+    catch and expensive to debug later.
+    """
+    batch, src_len, tgt_len = 4, 7, 9
+    src = torch.randint(4, len(src_vocab), (batch, src_len))
+    tgt_in = torch.randint(4, len(tgt_vocab), (batch, tgt_len))
+    src_lengths = torch.full((batch,), src_len)  # every fake sentence has length 7
+
+    h, c = model.encoder(src, src_lengths)
+    assert h.shape == (cfg.num_layers, batch, cfg.hidden_dim), h.shape
+    assert c.shape == (cfg.num_layers, batch, cfg.hidden_dim), c.shape
+
+    logits = model(src, src_lengths, tgt_in)
+    assert logits.shape == (batch, tgt_len, len(tgt_vocab)), logits.shape
+
+    fixed_vector_size = cfg.num_layers * 2 * cfg.hidden_dim
+    print(f"  encoder state   {tuple(h.shape)} x2 (h and c)")
+    print(f"  logits          {tuple(logits.shape)}")
+    print(
+        f"  fixed vector    {cfg.num_layers} layers x 2 states x "
+        f"{cfg.hidden_dim} units = {fixed_vector_size} numbers per sentence"
+    )
+    print(f"  parameters      {sum(p.numel() for p in model.parameters()):,}")
+
+
+def check_overfit(cfg, src_vocab, tgt_vocab, train_pairs):
+    """Can the model memorize 20 examples?
+
+    If it cannot, something is structurally broken and no amount of training on
+    the full set will help. This fails in seconds rather than minutes.
+    """
+    # 20 pairs in one batch means one optimizer step per epoch, so this needs
+    # far more epochs than the full run to reach a comparable number of steps.
+    small_cfg = Config(**{**cfg.__dict__, "epochs": 600, "batch_size": 20})
+    model = Seq2Seq(len(src_vocab), len(tgt_vocab), small_cfg)
+    subset = train_pairs[:20]
+    train(model, subset, small_cfg, src_vocab, tgt_vocab, log_every=200)
+    acc = exact_match(model, subset, small_cfg, src_vocab, tgt_vocab, greedy_decode)
+    print(f"  memorized {acc:.0%} of 20 training pairs")
+    return acc
